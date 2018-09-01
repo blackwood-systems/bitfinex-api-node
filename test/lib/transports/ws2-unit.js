@@ -4,6 +4,7 @@
 const assert = require('assert')
 const WSv2 = require('../../../lib/transports/ws2')
 const { MockWSv2Server } = require('bfx-api-mock-srv')
+const _isObject = require('lodash/isObject')
 
 const API_KEY = 'dummy'
 const API_SECRET = 'dummy'
@@ -67,6 +68,48 @@ describe('WSv2 utilities', () => {
 
     ws._sendCalc([])
   })
+
+  it('notifyUI: throws error if supplied invalid arguments', () => {
+    const ws = new WSv2()
+
+    assert.throws(() => ws.notifyUI())
+    assert.throws(() => ws.notifyUI(null))
+    assert.throws(() => ws.notifyUI(null, null))
+  })
+
+  it('notifyUI: throws error if socket closed or not authenticated', () => {
+    const ws = new WSv2()
+    const n = { type: 'info', message: 'test' }
+
+    assert.throws(() => ws.notifyUI(n))
+    ws._isOpen = true
+    assert.throws(() => ws.notifyUI(n))
+    ws._isAuthenticated = true
+    ws.send = () => {}
+    assert.doesNotThrow(() => ws.notifyUI(n))
+  })
+
+  it('notifyUI: sends the correct UCM broadcast notification', (done) => {
+    const ws = new WSv2()
+    ws._isOpen = true
+    ws._isAuthenticated = true
+    ws.send = (msg = []) => {
+      assert.deepEqual(msg[0], 0)
+      assert.deepEqual(msg[1], 'n')
+      assert.deepEqual(msg[2], null)
+
+      const data = msg[3]
+
+      assert(_isObject(data))
+      assert.deepEqual(data.type, 'ucm-notify-ui')
+      assert(_isObject(data.info))
+      assert.deepEqual(data.info.type, 'success')
+      assert.deepEqual(data.info.message, '42')
+      done()
+    }
+
+    ws.notifyUI({ type: 'success', message: '42' })
+  })
 })
 
 describe('WSv2 lifetime', () => {
@@ -120,6 +163,26 @@ describe('WSv2 lifetime', () => {
     })
   })
 
+  it('close: clears connection state', (done) => {
+    const wss = new MockWSv2Server()
+    const ws = createTestWSv2Instance()
+    ws._onWSClose = () => {} // disable fallback reset
+
+    ws.open()
+    ws.on('open', () => {
+      assert(ws._ws !== null)
+      assert(ws._isOpen)
+
+      ws.close().then(() => {
+        assert(ws._ws == null)
+        assert(!ws._isOpen)
+
+        wss.close()
+        done()
+      })
+    })
+  })
+
   it('auth: fails to auth twice', (done) => {
     const wss = new MockWSv2Server()
     const ws = createTestWSv2Instance()
@@ -157,6 +220,21 @@ describe('WSv2 lifetime', () => {
       }
 
       ws.auth(42)
+    })
+  })
+
+  it('auth: forwards dms param', (done) => {
+    const wss = new MockWSv2Server()
+    const ws = createTestWSv2Instance()
+    ws.open()
+    ws.on('open', () => {
+      ws.send = (data) => {
+        assert.equal(data.dms, 42)
+        wss.close()
+        done()
+      }
+
+      ws.auth(0, 42)
     })
   })
 
@@ -351,12 +429,12 @@ describe('WSv2 seq audit', () => {
       ws._onWSMessage(JSON.stringify([0, 'tu', [], 6, 6]))
       ws._onWSMessage(JSON.stringify([42, [], 7]))
       ws._onWSMessage(JSON.stringify([42, [], 8]))
-      ws._onWSMessage(JSON.stringify([42, [], 9]))  //
+      ws._onWSMessage(JSON.stringify([42, [], 9])) //
       ws._onWSMessage(JSON.stringify([42, [], 13])) // error
       ws._onWSMessage(JSON.stringify([42, [], 14]))
       ws._onWSMessage(JSON.stringify([42, [], 15]))
 
-      assert.equal(errorsSeen, 2)
+      assert.equal(errorsSeen, 6)
       wss.close()
       done()
     })
@@ -603,6 +681,20 @@ describe('WSv2 channel msg handling', () => {
     WSv2._notifyListenerGroup(lg, [0, 'test', [0, 'tu']], false)
   })
 
+  it('_notifyListenerGroup: doesn\'t fail on missing data if filtering', (done) => {
+    const lg = {
+      'test': [{
+        filter: { 1: 'on' },
+        cb: () => {
+          done(new Error('filter should not have matched'))
+        }
+      }]
+    }
+
+    WSv2._notifyListenerGroup(lg, [0, 'test'], false)
+    done()
+  })
+
   it('_propagateMessageToListeners: notifies all matching listeners', (done) => {
     const ws = new WSv2()
     ws._channelMap = { 0: { channel: 'auth' } }
@@ -782,7 +874,7 @@ describe('WSv2 channel msg handling', () => {
     ws._handleOBMessage([42, [[100, 2, 3]]], ws._channelMap[42])
   })
 
-  it('_updateManagedOB: returns an error on rm non-existent entry', () => {
+  it('_updateManagedOB: does nothing on rm non-existent entry', () => {
     const ws = new WSv2()
     ws._orderBooks.tBTCUSD = [
       [100, 1, 1],
@@ -790,8 +882,11 @@ describe('WSv2 channel msg handling', () => {
     ]
 
     const err = ws._updateManagedOB('tBTCUSD', [150, 0, -1])
-    assert(err)
-    assert(err instanceof Error)
+    assert.equal(err, null)
+    assert.deepEqual(ws._orderBooks.tBTCUSD, [
+      [100, 1, 1],
+      [200, 2, 1]
+    ])
   })
 
   it('_updateManagedOB: correctly maintains transformed OBs', () => {
@@ -1058,9 +1153,9 @@ describe('WSv2 event msg handling', () => {
   it('_handleConfigEvent: emits error if config failed', (done) => {
     const ws = new WSv2()
     ws.on('error', (err) => {
-      if (err.code === 42) done()
+      if (err.message.indexOf('42') !== -1) done()
     })
-    ws._handleConfigEvent({ status: 'bad', code: 42 })
+    ws._handleConfigEvent({ status: 'bad', flags: 42 })
   })
 
   it('_handleAuthEvent: emits an error on auth fail', (done) => {
@@ -1112,6 +1207,67 @@ describe('WSv2 event msg handling', () => {
     ws._handleSubscribedEvent({ chanId: 42, channel: 'test', extra: 'stuff' })
     ws._handleUnsubscribedEvent({ chanId: 42, channel: 'test', extra: 'stuff' })
     assert(Object.keys(ws._channelMap).length === 0)
+  })
+
+  it('_handleInfoEvent: passes message to relevant listeners (raw access)', (done) => {
+    const wss = new MockWSv2Server()
+    const ws = createTestWSv2Instance()
+    ws.once('open', () => {
+      let n = 0
+
+      ws._infoListeners[42] = [
+        () => { n += 1 },
+        () => { n += 2 }
+      ]
+
+      ws._handleInfoEvent({ code: 42 })
+
+      assert.equal(n, 3)
+      wss.close()
+      done()
+    })
+
+    ws.open()
+  })
+
+  it('_handleInfoEvent: passes message to relevant listeners', (done) => {
+    const wss = new MockWSv2Server()
+    const ws = createTestWSv2Instance()
+    ws.once('open', () => {
+      let n = 0
+
+      ws.onInfoMessage(42, () => { n += 1 })
+      ws.onInfoMessage(42, () => { n += 2 })
+      ws._handleInfoEvent({ code: 42 })
+
+      assert.equal(n, 3)
+      wss.close()
+      done()
+    })
+
+    ws.open()
+  })
+
+  it('_handleInfoEvent: passes message to relevant named listeners', (done) => {
+    const wss = new MockWSv2Server()
+    const ws = createTestWSv2Instance()
+    ws.once('open', () => {
+      let n = 0
+
+      ws.onServerRestart(() => { n += 1 })
+      ws.onMaintenanceStart(() => { n += 10 })
+      ws.onMaintenanceEnd(() => { n += 100 })
+
+      ws._handleInfoEvent({ code: WSv2.info.SERVER_RESTART })
+      ws._handleInfoEvent({ code: WSv2.info.MAINTENANCE_START })
+      ws._handleInfoEvent({ code: WSv2.info.MAINTENANCE_END })
+
+      assert.equal(n, 111)
+      wss.close()
+      done()
+    })
+
+    ws.open()
   })
 
   it('_handleInfoEvent: closes & emits error if not on api v2', (done) => {
@@ -1268,7 +1424,141 @@ describe('WSv2 packet watch-dog', () => {
 
     setTimeout(() => {
       clearInterval(sendInterval)
+      clearTimeout(ws._packetWDTimeout)
       done()
     }, 200)
+  })
+})
+
+describe('WSv2 message sending', () => {
+  it('emits error if no client available or open', (done) => {
+    const ws = new WSv2()
+
+    ws.on('error', (e) => {
+      if (e.message.indexOf('no ws client') === -1) {
+        done(new Error('received unexpected error'))
+      } else {
+        done()
+      }
+    })
+
+    ws.send({})
+  })
+
+  it('emits error if connection is closing', (done) => {
+    const ws = new WSv2()
+
+    ws._ws = true
+    ws._isOpen = true
+    ws._isClosing = true
+
+    ws.on('error', (e) => {
+      if (e.message.indexOf('currently closing') === -1) {
+        done(new Error('received unexpected error'))
+      } else {
+        done()
+      }
+    })
+
+    ws.send({})
+  })
+
+  it('sends stringified payload', (done) => {
+    const ws = new WSv2()
+
+    ws._isOpen = true
+    ws._isClosing = false
+    ws._ws = {
+      send: (json) => {
+        const msg = JSON.parse(json)
+
+        assert.equal(msg.a, 42)
+        done()
+      }
+    }
+
+    ws.send({ a: 42 })
+  })
+})
+
+describe('WSv2 seq audit: _validateMessageSeq', () => {
+  it('returns an error on invalid pub seq', () => {
+    const ws = new WSv2()
+
+    ws._seqAudit = true
+    ws._lastPubSeq = 0
+
+    assert.equal(ws._validateMessageSeq([243, [252.12, 2, -1], 1]), null)
+    assert.equal(ws._validateMessageSeq([243, [252.12, 2, -1], 2]), null)
+
+    const err = ws._validateMessageSeq([243, [252.12, 2, -1], 5])
+    assert(err instanceof Error)
+  })
+
+  it('returns an error on invalid auth seq', () => {
+    const ws = new WSv2()
+
+    ws._seqAudit = true
+    ws._lastPubSeq = 0
+    ws._lastAuthSeq = 0
+
+    assert.equal(ws._validateMessageSeq([0, [252.12, 2, -1], 1, 1]), null)
+    assert.equal(ws._validateMessageSeq([0, [252.12, 2, -1], 2, 2]), null)
+
+    const err = ws._validateMessageSeq([0, [252.12, 2, -1], 3, 5])
+    assert(err instanceof Error)
+  })
+
+  it('ignores heartbeats', () => {
+    const ws = new WSv2()
+
+    ws._seqAudit = true
+    ws._lastPubSeq = 0
+
+    assert.equal(ws._validateMessageSeq([243, [252.12, 2, -1], 1]), null)
+    assert.equal(ws._validateMessageSeq([243, [252.12, 2, -1], 2]), null)
+    assert.equal(ws._validateMessageSeq([243, 'hb']), null)
+    assert.equal(ws._validateMessageSeq([243, 'hb']), null)
+    assert.equal(ws._validateMessageSeq([243, [252.12, 2, -1], 3]), null)
+    assert.equal(ws._validateMessageSeq([243, [252.12, 2, -1], 4]), null)
+  })
+
+  it('skips auth seq for error notifications', () => {
+    const ws = new WSv2()
+
+    ws._seqAudit = true
+    ws._lastPubSeq = 0
+    ws._lastAuthSeq = 0
+
+    const nSuccess = [null, null, null, null, null, null, 'SUCCESS']
+    const nError = [null, null, null, null, null, null, 'ERROR']
+
+    assert.equal(ws._validateMessageSeq([0, 'n', nSuccess, 1, 1]), null)
+    assert.equal(ws._validateMessageSeq([0, 'n', nSuccess, 2, 2]), null)
+    assert.equal(ws._validateMessageSeq([0, 'n', nError, 3]), null)
+    assert.equal(ws._validateMessageSeq([0, 'n', nSuccess, 4, 3]), null)
+    assert.equal(ws._validateMessageSeq([0, 'n', nSuccess, 5, 4]), null)
+  })
+})
+
+describe('_handleTradeMessage', () => {
+  it('correctly forwards payloads w/ seq numbers', (done) => {
+    const ws = new WSv2()
+    const payload = [
+      [286614318, 1535531325604, 0.05, 7073.51178714],
+      [286614249, 1535531321436, 0.0215938, 7073.6],
+      [286614248, 1535531321430, 0.0284062, 7073.51178714]
+    ]
+    const msg = [1710, payload, 1]
+
+    ws.onTrades({ pair: 'tBTCUSD' }, (data) => {
+      assert.deepStrictEqual(data, payload)
+      done()
+    })
+
+    ws._handleTradeMessage(msg, {
+      channel: 'trades',
+      pair: 'tBTCUSD'
+    })
   })
 })

@@ -5,16 +5,21 @@ const assert = require('assert')
 const WSv2 = require('../../../lib/transports/ws2')
 const { Order } = require('../../../lib/models')
 const { MockWSv2Server } = require('bfx-api-mock-srv')
+const {
+  getFundingTicker, getTradingTicker, auditTicker
+} = require('../../helpers/data')
 
 const API_KEY = 'dummy'
 const API_SECRET = 'dummy'
 
 const createTestWSv2Instance = (params = {}) => {
-  return new WSv2(Object.assign({
+  return new WSv2({
     apiKey: API_KEY,
     apiSecret: API_SECRET,
-    url: 'ws://localhost:9997'
-  }, params))
+    url: 'ws://localhost:9997',
+
+    ...params
+  })
 }
 
 describe('WSv2 orders', () => {
@@ -80,6 +85,38 @@ describe('WSv2 orders', () => {
     })
 
     ws.open()
+  })
+
+  it('updateOrder: sends order changeset packet through', (done) => {
+    const wss = new MockWSv2Server()
+    const wsSingle = createTestWSv2Instance()
+    wsSingle.open()
+    wsSingle.on('open', wsSingle.auth.bind(wsSingle))
+    wsSingle.once('auth', () => {
+      const o = new Order({
+        id: Date.now(),
+        type: 'EXCHANGE LIMIT',
+        price: 100,
+        amount: 1,
+        symbol: 'tBTCUSD'
+      }, wsSingle)
+
+      wsSingle._ws.send = (msgJSON) => {
+        const msg = JSON.parse(msgJSON)
+
+        assert.equal(msg[0], 0)
+        assert.equal(msg[1], 'ou')
+        assert(msg[3])
+        assert.equal(msg[3].id, o.id)
+        assert.equal(msg[3].delta, 1)
+        assert.equal(msg[3].price, 200)
+
+        wss.close()
+        done()
+      }
+
+      o.update({ price: 200, delta: 1 })
+    })
   })
 
   it('sends individual order packets when not buffering', (done) => {
@@ -255,5 +292,53 @@ describe('WSv2 info message handling', () => {
       code: WSv2.info.MAINTENANCE_END,
       msg: ''
     }))
+  })
+})
+
+describe('data parsing', () => {
+  it('correctly parses trading tickers', (done) => {
+    const wss = new MockWSv2Server({ listen: true })
+    const ws = createTestWSv2Instance({ transform: true })
+    ws.open()
+    ws.on('error', done)
+    ws.on('open', () => {
+      ws._channelMap = {
+        5: {
+          channel: 'ticker',
+          symbol: 'tETHUSD'
+        }
+      }
+
+      ws.onTicker({ symbol: 'tETHUSD' }, (ticker) => {
+        auditTicker(ticker, 'tETHUSD')
+        wss.close()
+        done()
+      })
+
+      wss.send([5, getTradingTicker()])
+    })
+  })
+
+  it('correctly parses funding tickers', (done) => {
+    const wss = new MockWSv2Server({ listen: true })
+    const ws = createTestWSv2Instance({ transform: true })
+    ws.open()
+    ws.on('error', done)
+    ws.on('open', () => {
+      ws._channelMap = {
+        5: {
+          channel: 'ticker',
+          symbol: 'fUSD'
+        }
+      }
+
+      ws.onTicker({ symbol: 'fUSD' }, (ticker) => {
+        auditTicker(ticker, 'fUSD')
+        wss.close()
+        done()
+      })
+
+      wss.send([5, getFundingTicker()])
+    })
   })
 })

@@ -346,6 +346,12 @@ describe('Order model', () => {
     o._onWSOrderClose([42])
   })
 
+  it('_onWSOrderClose: emits update event', (done) => {
+    const o = new Order({ id: 100 })
+    o.on('update', () => done())
+    o._onWSOrderClose([42])
+  })
+
   it('_onWSOrderNew: updates last fill amount', () => {
     testHandlerFillUpdate('_onWSOrderNew')
   })
@@ -359,6 +365,12 @@ describe('Order model', () => {
   it('_onWSOrderNew: emits update event', (done) => {
     const o = new Order({ id: 100 })
     o.on('update', () => done())
+    o._onWSOrderNew([42])
+  })
+
+  it('_onWSOrderNew: emits new event', (done) => {
+    const o = new Order({ id: 100 })
+    o.on('new', () => done())
     o._onWSOrderNew([42])
   })
 
@@ -490,5 +502,154 @@ describe('Order model', () => {
 
     o.setPostOnly(true)
     assert(o.isPostOnly())
+  })
+
+  it('includesVariableRates, setVariableRates: updates/reads NO_VR flag', () => {
+    const o = new Order()
+    assert(o.includesVariableRates())
+    o.setNoVariableRates(true)
+    assert(!o.includesVariableRates())
+
+    o.setNoVariableRates(false)
+    assert(o.includesVariableRates())
+
+    o.setNoVariableRates(true)
+    assert(!o.includesVariableRates())
+  })
+
+  it('isPositionClose, setPositionClose: updates/reads posclose flag', () => {
+    const o = new Order()
+    assert(!o.isPositionClose())
+    o.setPositionClose(true)
+    assert(o.isPositionClose())
+
+    o.setPositionClose(false)
+    assert(!o.isPositionClose())
+
+    o.setPositionClose(true)
+    assert(o.isPositionClose())
+  })
+
+  it('isReduceOnly, setReduceOnly: updates/reads reduceOnly flag', () => {
+    const o = new Order()
+    assert(!o.isReduceOnly())
+    o.setReduceOnly(true)
+    assert(o.isReduceOnly())
+
+    o.setReduceOnly(false)
+    assert(!o.isReduceOnly())
+
+    o.setReduceOnly(true)
+    assert(o.isReduceOnly())
+  })
+
+  it('update: applies changeset to order model', (done) => {
+    const o = new Order({ price: 42, amount: 1 }, { updateOrder: () => Promise.resolve() })
+    assert.equal(o.price, 42)
+    assert.equal(o.amount, 1)
+
+    o.update({ delta: 1, price: 43 }).catch(done)
+
+    assert.equal(o.price, 43)
+    assert.equal(o.amount, 2)
+
+    assert(typeof o.priceAuxLimit === 'undefined')
+    o.update({ price_aux_limit: 42 }).catch(done)
+    assert(typeof o.price_aux_limit === 'undefined')
+    assert.equal(o.priceAuxLimit, 42)
+
+    assert(typeof o.priceTrailing === 'undefined')
+    o.update({ price_trailing: 42 }).catch(done)
+    assert(typeof o.price_trailing === 'undefined')
+    assert.equal(o.priceTrailing, 42)
+
+    assert(o.gid !== 42)
+    o.update({ gid: 42 }).catch(done)
+    assert.equal(o.gid, 42)
+
+    done()
+  })
+
+  it('update: prepares price & amount', (done) => {
+    const o = new Order({
+      price: 42,
+      amount: 1
+    }, {
+      updateOrder: (changes) => {
+        assert.strictEqual(changes.price, '43.000')
+        assert.strictEqual(changes.amount, '3.00000000')
+        done()
+      }
+    })
+
+    o.update({ price: 43, amount: 3 })
+  })
+
+  it('update: prepares delta', (done) => {
+    const o = new Order({
+      price: 42,
+      amount: 1
+    }, {
+      updateOrder: (changes) => {
+        assert.strictEqual(changes.delta, '3.00000000')
+        done()
+      }
+    })
+
+    o.update({ delta: 3 })
+  })
+
+  it('update: prepares aux limit price', (done) => {
+    const o = new Order({
+      price: 42,
+      amount: 1
+    }, {
+      updateOrder: (changes) => {
+        assert.strictEqual(changes.price_aux_limit, '3.0000')
+        done()
+      }
+    })
+
+    o.update({ price_aux_limit: 3 })
+  })
+
+  it('update: prepares trailing price', (done) => {
+    const o = new Order({
+      price: 42,
+      amount: 1
+    }, {
+      updateOrder: (changes) => {
+        assert.strictEqual(changes.price_trailing, '43.000')
+        done()
+      }
+    })
+
+    o.update({ price_trailing: 43 })
+  })
+
+  it('update: rejects with error if applying delta to missing amount', (done) => {
+    const o = new Order()
+
+    o.update({ delta: 1 }).catch(() => {
+      done() // no error
+    })
+  })
+
+  it('update: forwards update to ws2', (done) => {
+    const o = new Order({}, { // dirty ws2 mock
+      updateOrder: (o) => {
+        assert(o)
+        assert.equal(o.test, 42)
+        done()
+      }
+    })
+
+    o.update({ test: 42 }).catch(done)
+  })
+
+  it('isPartiallyFilled: returns true if the order is partially filled', () => {
+    assert(new Order({ amount: 5, amountOrig: 25 }).isPartiallyFilled())
+    assert(!new Order({ amount: 0, amountOrig: 25 }).isPartiallyFilled())
+    assert(!new Order({ amount: 25, amountOrig: 25 }).isPartiallyFilled())
   })
 })
